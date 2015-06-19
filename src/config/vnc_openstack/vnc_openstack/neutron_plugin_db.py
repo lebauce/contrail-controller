@@ -99,9 +99,11 @@ class DBInterface(object):
         return_project_ids = []
         for project_id in project_ids:
             try:
-                return_project_ids.append(str(uuid.UUID(project_id)))
+                if project_id:
+                    project_id = str(uuid.UUID(project_id))
             except ValueError:
                 continue
+            return_project_ids.append(project_id)
 
         return return_project_ids
 
@@ -325,13 +327,20 @@ class DBInterface(object):
     #end _virtual_network_delete
 
     def _virtual_network_list(self, parent_id=None, obj_uuids=None,
-                              fields=None, detail=False, count=False):
+                              fields=None, detail=False, count=False,
+                              filters={}, sorts=[], limit=None, marker=None,
+                              page_reverse=False):
         return self._vnc_lib.virtual_networks_list(
                                               parent_id=parent_id,
                                               obj_uuids=obj_uuids,
                                               fields=fields,
+                                              filters=filters,
                                               detail=detail,
-                                              count=count)
+                                              count=count,
+                                              sorts=sorts,
+                                              limit=limit,
+                                              marker=marker,
+                                              page_reverse=page_reverse)
     #end _virtual_network_list
 
     def _virtual_machine_interface_read(self, port_id=None, fq_name=None,
@@ -432,6 +441,7 @@ class DBInterface(object):
                 project_uuid = str(uuid.UUID(project_id))
             except Exception:
                 print "Error in converting uuid %s" % (project_id)
+                return []
         else:
             project_uuid = None
 
@@ -440,7 +450,11 @@ class DBInterface(object):
                                                  count=True)
         else:
             ret_val = self._virtual_network_list(parent_id=project_uuid,
-                                                 detail=True)
+                                                 detail=True,
+                                                 sorts=sorts,
+                                                 limit=limit,
+                                                 marker=marker,
+                                                 page_reverse=page_reverse)
 
         return ret_val
     #end _network_list_project
@@ -562,9 +576,14 @@ class DBInterface(object):
             self._raise_contrail_exception('RouterInUse', router_id=rtr_id)
     #end _logical_router_delete
 
-    def _floatingip_list(self, back_ref_id=None):
+    def _floatingip_list(self, back_ref_id=None, sorts={},
+                         limit=None, marker=None, page_reverse=False):
         return self._vnc_lib.floating_ips_list(back_ref_id=back_ref_id,
-                                               detail=True)
+                                               detail=True,
+                                               sorts=sorts,
+                                               limit=limit,
+                                               marker=marker,
+                                               page_reverse=page_reverse)
     #end _floatingip_list
 
     # find floating ip pools a project has access to
@@ -2268,32 +2287,55 @@ class DBInterface(object):
     #end network_delete
 
     # TODO request based on filter contents
-    def _network_list(self, context, filters=None):
+    def _network_list(self, context, filters=None, sorts={},
+                      limit=None, marker=None, page_reverse=False):
         # collect phase
         all_net_objs = []  # all n/ws in all projects
         project_uuids = []
         is_admin = context and context['is_admin']
 
-        if 'id' in filters:
-            for net_id in filters['id']:
-                all_net_objs.append(self._network_read(net_id))
-
-        elif 'tenant_id' in filters:
+        if 'tenant_id' in filters:
             project_uuids = self._validate_project_ids(context,
                                                        filters['tenant_id'])
 
         elif not is_admin and \
-             filters.get('shared', None) == False and \
-             filters.get('router:external', None) == False:
+             filters.get('shared', None) == [False] and \
+             filters.get('router:external', None) == [False]:
             project_uuids = self._validate_project_ids(context,
                                                        context['tenant'])
 
-        else:
-            project_uuids = [None]
+        net_filters = {}
+        attr_map = {
+            'shared': 'is_shared',
+            'router:external': 'router_external',
+            'id': 'obj_uuids',
+            'contrail:fq_name': 'fq_name',
+        }
 
-        for project in project_uuids:
-            net_objs = self._network_list_project(project)
-            all_net_objs.extend(net_objs)
+        for filter_name, filter_value in filters.items():
+            if filter_name == 'tenant_id':
+                continue
+            else:
+                filter_name = attr_map.get(filter_name) or filter_name
+
+            net_filters[filter_name] = map(unicode, filter_value)
+
+        native_pagination = is_admin and 'name' not in filters
+
+        if native_pagination:
+            net_objs = self._virtual_network_list(parent_id=project_uuids,
+                                                  filters=net_filters,
+                                                  detail=True,
+                                                  sorts=sorts,
+                                                  limit=limit,
+                                                  marker=marker,
+                                                  page_reverse=page_reverse)
+            return net_objs
+
+        net_objs = self._virtual_network_list(parent_id=project_uuids,
+                                              filters=net_filters,
+                                              detail=True)
+        all_net_objs.extend(net_objs)
 
         # prune phase
         ret_dict = {}
@@ -2301,24 +2343,12 @@ class DBInterface(object):
             if net_obj.uuid in ret_dict:
                 continue
 
-            net_fq_name = unicode(net_obj.get_fq_name())
-            if not self._filters_is_present(filters, 'contrail:fq_name',
-                                            net_fq_name):
-                continue
-
             if not self._filters_is_present(
                 filters, 'name', net_obj.get_display_name() or net_obj.name):
                 continue
 
             is_external = net_obj.router_external == True
-            if not self._filters_is_present(filters, 'router:external',
-                                            is_external):
-                continue
-
             is_shared = net_obj.is_shared == True
-            if not self._filters_is_present(filters, 'shared',
-                                            is_shared):
-                continue
 
             if not is_admin and not is_shared and not is_external and \
                    net_obj.parent_uuid.replace('-', '') != context['tenant']:
@@ -2329,7 +2359,8 @@ class DBInterface(object):
         return ret_dict.values()
     #end network_list
 
-    def network_list(self, context, filters=None):
+    def network_list(self, context, filters=None, sorts={},
+                     limit=None, marker=None, page_reverse=False):
         def vnc_to_neutron(net_obj):
             try:
                 return self._network_vnc_to_neutron(net_obj,
@@ -2338,7 +2369,9 @@ class DBInterface(object):
                 return
 
         return map(vnc_to_neutron,
-                   self._network_list(context=context, filters=filters))
+                   self._network_list(context=context, filters=filters,
+                                      sorts=sorts, limit=limit, marker=marker,
+                                      page_reverse=page_reverse))
 
     def _resource_count_optimized(self, resource, filters=None):
         if filters and ('tenant_id' not in filters or len(filters.keys()) > 1):
@@ -2568,25 +2601,23 @@ class DBInterface(object):
                     return
     #end subnet_delete
 
-    def subnets_list(self, context, filters=None):
+    def subnets_list(self, context, filters=None, sorts={},
+                     limit=None, marker=None, page_reverse=False):
         ret_subnets = []
+
+        netlist_filters = {}
+        if 'network_id' in filters:
+            netlist_filters = {'id': filters['network_id']}
 
         all_net_objs = []
         if filters and 'id' in filters:
             # required subnets are specified,
             # just read in corresponding net_ids
             subnet_keys = self._subnet_vnc_read_mapping(id=filters['id'])
-            net_ids = [sk.split()[0] for sk in subnet_keys]
-            all_net_objs.extend(self._virtual_network_list(obj_uuids=net_ids,
-                                                           detail=True))
+            for net_id in set([sk.split()[0] for sk in subnet_keys]):
+                all_net_objs.append(self._network_read(net_id))
         else:
-            if not context['is_admin']:
-                proj_id = context['tenant']
-            else:
-                proj_id = None
-            net_objs = self._network_list_project(proj_id)
-            all_net_objs.extend(net_objs)
-            net_objs = self._network_list_shared()
+            net_objs = self._network_list(context=context, filters=netlist_filters)
             all_net_objs.extend(net_objs)
 
         ret_dict = {}
@@ -2602,31 +2633,19 @@ class DBInterface(object):
                         sn_info = self._subnet_vnc_to_neutron(subnet_vnc,
                                                               net_obj,
                                                               ipam_ref['to'])
-                        sn_id = sn_info['id']
-                        sn_proj_id = sn_info['tenant_id']
-                        sn_net_id = sn_info['network_id']
-                        sn_name = sn_info['name']
 
-                        if (filters and 'shared' in filters and
-                                        filters['shared'][0] == True):
-                            if not net_obj.is_shared:
-                                continue
-                        elif filters:
-                            if not self._filters_is_present(filters, 'id',
-                                                            sn_id):
-                                continue
-                            if not self._filters_is_present(filters,
-                                                            'tenant_id',
-                                                            sn_proj_id):
-                                continue
-                            if not self._filters_is_present(filters,
-                                                            'network_id',
-                                                            sn_net_id):
-                                continue
-                            if not self._filters_is_present(filters,
-                                                            'name',
-                                                            sn_name):
-                                continue
+                        if not self._filters_is_present(filters,
+                                                        'id',
+                                                        sn_info['id']):
+                            continue
+                        if not self._filters_is_present(filters,
+                                                        'tenant_id',
+                                                        sn_info['tenant_id']):
+                            continue
+                        if not self._filters_is_present(filters,
+                                                        'name',
+                                                        sn_info['name']):
+                            continue
 
                         ret_subnets.append(sn_info)
 
@@ -2677,7 +2696,8 @@ class DBInterface(object):
     #end ipam_delete
 
     # TODO request based on filter contents
-    def ipam_list(self, context=None, filters=None):
+    def ipam_list(self, context=None, filters=None, sorts={},
+                  limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase
@@ -2755,7 +2775,8 @@ class DBInterface(object):
     #end policy_delete
 
     # TODO request based on filter contents
-    def policy_list(self, context=None, filters=None):
+    def policy_list(self, context=None, filters=None, sorts={},
+                    limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase
@@ -2923,7 +2944,8 @@ class DBInterface(object):
     #end router_delete
 
     # TODO request based on filter contents
-    def router_list(self, context=None, filters=None):
+    def router_list(self, context=None, filters=None, sorts={},
+                    limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         if filters and 'shared' in filters:
@@ -3470,7 +3492,8 @@ class DBInterface(object):
         return False
     # end _port_fixed_ips_is_present
 
-    def port_list(self, context=None, filters=None):
+    def port_list(self, context=None, filters=None, sorts={},
+                  limit=None, marker=None, page_reverse=False):
         project_obj = None
         ret_q_ports = []
         all_project_ids = []
@@ -3649,7 +3672,8 @@ class DBInterface(object):
 
    #end security_group_delete
 
-    def security_group_list(self, context, filters=None):
+    def security_group_list(self, context, filters=None, sorts={},
+                            limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase
@@ -3770,7 +3794,8 @@ class DBInterface(object):
         return sg_rules
     #end security_group_rules_read
 
-    def security_group_rule_list(self, context=None, filters=None):
+    def security_group_rule_list(self, context=None, filters=None, sorts={},
+                                 limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase
@@ -3833,7 +3858,8 @@ class DBInterface(object):
         self._route_table_delete(rt_id)
     #end route_table_delete
 
-    def route_table_list(self, context, filters=None):
+    def route_table_list(self, context, filters=None, sorts={},
+                         limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase
@@ -3893,7 +3919,8 @@ class DBInterface(object):
         self._svc_instance_delete(si_id)
     #end svc_instance_delete
 
-    def svc_instance_list(self, context, filters=None):
+    def svc_instance_list(self, context, filters=None, sorts={},
+                          limit=None, marker=None, page_reverse=False):
         ret_list = []
 
         # collect phase

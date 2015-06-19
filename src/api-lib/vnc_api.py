@@ -596,7 +596,8 @@ class VncApi(VncApiClientGen):
 
     def resource_list(self, obj_type, parent_id=None, parent_fq_name=None,
                       back_ref_id=None, obj_uuids=None, fields=None,
-                      detail=False, count=False):
+                      detail=False, count=False, filters={}, sorts=[],
+                      limit=None, marker=None, page_reverse=False):
         if not obj_type:
             raise ResourceTypeUnknownError(obj_type)
 
@@ -637,9 +638,27 @@ class VncApi(VncApiClientGen):
             comma_sep_fields = ','.join(f for f in fields)
             query_params['fields'] = comma_sep_fields
 
+        if filters:
+            for name, values in filters.items():
+                comma_sep_filters = ','.join(v for v in values)
+                query_params[name] = comma_sep_filters
+
         query_params['detail'] = detail
 
         query_params['count'] = count
+
+        # TODO: Handle multiple sort_keys
+        for sort_key, sort_dir in (sorts or []):
+            if sort_key == "id":
+                sort_key = "uuid"
+            query_params['sort_key'] = sort_key
+            query_params['sort_dir'] = {True:'asc',False:'desc'}[sort_dir]
+
+        query_params['limit'] = limit
+
+        query_params['marker'] = marker
+
+        query_params['page_reverse'] = page_reverse
 
         if do_post_for_list:
             uri = self._action_uri.get('list-bulk-collection')
@@ -661,6 +680,7 @@ class VncApi(VncApiClientGen):
 
         resource_dicts = json.loads(content)['%ss' %(obj_type)]
         resource_objs = []
+
         for resource_dict in resource_dicts:
             obj_dict = resource_dict['%s' %(obj_type)]
             resource_obj = obj_class.from_dict(**obj_dict)

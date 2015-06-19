@@ -190,10 +190,15 @@ class NeutronPluginInterface(object):
         """
 
         filters = network['filters']
+        sorts = network.get('sorts')
+        limit = network.get('limit')
+        marker = network.get('marker')
+        page_reverse = network.get('page_reverse', False)
 
         try:
             cfgdb = self._get_user_cfgdb(context)
-            nets_info = cfgdb.network_list(context, filters)
+            nets_info = cfgdb.network_list(context, filters, sorts,
+                                           limit, marker, page_reverse)
             return json.dumps(nets_info)
         except Exception as e:
             cgitb.Hook(format="text").handle(sys.exc_info())
@@ -318,10 +323,15 @@ class NeutronPluginInterface(object):
         """
 
         filters = subnet['filters']
+        sorts = subnet.get('sorts')
+        limit = subnet.get('limit')
+        marker = subnet.get('marker')
+        page_reverse = subnet.get('page_reverse', False)
 
         try:
             cfgdb = self._get_user_cfgdb(context)
-            subnets_info = cfgdb.subnets_list(context, filters)
+            subnets_info = cfgdb.subnets_list(context, filters, sorts,
+                                              limit, marker, page_reverse)
             return json.dumps([self._make_subnet_dict(i) for i in subnets_info])
         except Exception as e:
             cgitb.Hook(format="text").handle(sys.exc_info())
@@ -423,10 +433,15 @@ class NeutronPluginInterface(object):
         """
 
         filters = port['filters']
+        sorts = port.get('sorts')
+        limit = port.get('limit')
+        marker = port.get('marker')
+        page_reverse = port.get('page_reverse', False)
 
         try:
             cfgdb = self._get_user_cfgdb(context)
-            ports_info = cfgdb.port_list(context, filters)
+            ports_info = cfgdb.port_list(context, filters, sorts,
+                                         limit, marker, page_reverse)
             return json.dumps(ports_info)
         except Exception as e:
             cgitb.Hook(format="text").handle(sys.exc_info())
